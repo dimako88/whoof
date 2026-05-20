@@ -103,12 +103,17 @@ that round-trips through `shortcuts://x-callback-url`.
 - **Poincaré plot** — SD1/SD2 scatter from last night's RR intervals, rendered
   in the Recovery tab. Tells you at a glance whether short-term or long-term
   HRV is dominating.
+- **HRV baseline display** — Recovery tab shows today's RMSSD vs. your 14-day
+  rolling baseline (e.g., "52 ms vs baseline 45 ms (+16%)") — the core number
+  Whoop shows only to paying subscribers.
+- **Recovery calendar heatmap** — 30-day grid in the Trends tab coloured
+  green/yellow/red by recovery score. Today's cell is highlighted.
 
 ### Data & export
 - **IndexedDB persistence** — samples, daily_metrics, journal, captures,
   workouts, sleep_stages, and profile — all local, no server.
-- **CSV export** — separate buttons for raw samples, daily metrics, and journal
-  entries. JSON export/import for full backup/restore.
+- **CSV export** — separate buttons for raw samples, daily metrics, journal
+  entries, and detected workouts. JSON export/import for full backup/restore.
 - **Progressive Web App** — installable, cache-first for assets, offline-capable.
 - **Push notifications** — opt-in for backfill complete, low recovery, low
   battery, and HR anomaly alerts.
@@ -313,7 +318,7 @@ whoop/
 ├── whoopfree/              Python package (HTTP server that serves web/)
 │   └── dashboard.py        stdlib http.server → serves web/
 ├── tests/
-│   ├── js/                 Vitest unit tests (247 tests, ~2.2 s)
+│   ├── js/                 Vitest unit tests (250 tests, ~2.5 s)
 │   └── *.py                Python metric tests (kept for reference)
 └── run.sh                  `./run.sh dash` starts the server
 ```
