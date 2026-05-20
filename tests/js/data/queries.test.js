@@ -8,6 +8,7 @@ import {
   upsertDailyMetric, getDailyMetric, recentDailyMetrics,
   upsertJournalEntry, journalForDate, recentJournalEntries, deleteJournalEntry,
   replaceWorkoutsForDate, workoutsForDate, patchWorkoutLabel,
+  personalRecords,
 } from '../../../web/js/data/queries.js';
 
 const TEST_DB = 'whoopfree-queries-test';
@@ -190,5 +191,42 @@ describe('workouts patchWorkoutLabel', () => {
 
   it('is a no-op for a non-existent id', async () => {
     await expect(patchWorkoutLabel(db, 99999, 'Ghost')).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// personalRecords
+// ---------------------------------------------------------------------------
+
+describe('personalRecords', () => {
+  it('returns null for all records when db is empty', async () => {
+    const prs = await personalRecords(db);
+    expect(prs.hrv_max).toBeNull();
+    expect(prs.rhr_min).toBeNull();
+    expect(prs.recovery_max).toBeNull();
+    expect(prs.sleep_max_min).toBeNull();
+    expect(prs.strain_max).toBeNull();
+    expect(prs.sleep_perf_max).toBeNull();
+  });
+
+  it('finds the correct best values across multiple rows', async () => {
+    await upsertDailyMetric(db, { date: '2026-01-01', rmssd_ms: 40, resting_hr: 55, recovery_score: 60, sleep_minutes: 360, strain_score: 10, sleep_performance_pct: 70 });
+    await upsertDailyMetric(db, { date: '2026-01-02', rmssd_ms: 75, resting_hr: 48, recovery_score: 85, sleep_minutes: 480, strain_score: 16, sleep_performance_pct: 92 });
+    await upsertDailyMetric(db, { date: '2026-01-03', rmssd_ms: 60, resting_hr: 51, recovery_score: 70, sleep_minutes: 420, strain_score: 13, sleep_performance_pct: 81 });
+    const prs = await personalRecords(db);
+    expect(prs.hrv_max).toEqual({ value: 75, date: '2026-01-02' });
+    expect(prs.rhr_min).toEqual({ value: 48, date: '2026-01-02' });
+    expect(prs.recovery_max).toEqual({ value: 85, date: '2026-01-02' });
+    expect(prs.sleep_max_min).toEqual({ value: 480, date: '2026-01-02' });
+    expect(prs.strain_max).toEqual({ value: 16, date: '2026-01-02' });
+    expect(prs.sleep_perf_max).toEqual({ value: 92, date: '2026-01-02' });
+  });
+
+  it('skips null fields without crashing', async () => {
+    // Row with only HRV, others null
+    await upsertDailyMetric(db, { date: '2026-02-01', rmssd_ms: 65 });
+    const prs = await personalRecords(db);
+    expect(prs.hrv_max).toEqual({ value: 65, date: '2026-02-01' });
+    expect(prs.rhr_min).toBeNull(); // no resting_hr data
   });
 });

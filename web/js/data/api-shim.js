@@ -11,6 +11,7 @@ import {
   getProfile, putProfile,
   getDailyMetric, recentDailyMetrics,
   workoutsForDate, sleepStagesForDate, patchWorkoutLabel,
+  personalRecords,
 } from './queries.js';
 import { rollupDay, recomputeRecent, rollupMissing } from '../metrics/rollup.js';
 import { maxHr } from '../metrics/zones.js';
@@ -397,7 +398,8 @@ async function handle(url, opts = {}) {
   if (path === '/api/strain')   return apiStrain(qs.get('date'));
   if (path === '/api/trends')   return apiTrends(qs.get('metric') ?? 'recovery_score', parseInt(qs.get('days') ?? '30', 10));
   if (path === '/api/workouts') return apiWorkouts(parseInt(qs.get('days') ?? '30', 10));
-  if (path === '/api/profile')  return apiProfileGet();
+  if (path === '/api/profile')          return apiProfileGet();
+  if (path === '/api/personal-records') return personalRecords(await db());
   if (path === '/api/live')     return apiLive(parseInt(qs.get('seconds') ?? '300', 10));
 
   return null; // signal "not handled" — caller falls through to fetch()

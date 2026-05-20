@@ -806,6 +806,33 @@ async function loadTrends() {
   });
 
   renderTrendsTable(history.days || []);
+  renderPersonalRecords();
+}
+
+async function renderPersonalRecords() {
+  const el = $("personal-records");
+  if (!el) return;
+  try {
+    const prs = await fetchJSON("/api/personal-records");
+    const items = [
+      { label: "Best HRV",         pr: prs.hrv_max,        fmt: (v) => v.toFixed(0) + " ms",  color: COLORS.recGood  },
+      { label: "Lowest RHR",       pr: prs.rhr_min,        fmt: (v) => v.toFixed(0) + " bpm", color: COLORS.strain   },
+      { label: "Peak recovery",    pr: prs.recovery_max,   fmt: (v) => v.toFixed(0) + "%",     color: COLORS.recGood  },
+      { label: "Longest sleep",    pr: prs.sleep_max_min,  fmt: (v) => fmtHM(v),               color: COLORS.stage.deep },
+      { label: "Peak strain",      pr: prs.strain_max,     fmt: (v) => v.toFixed(1) + "/21",   color: COLORS.recMid   },
+      { label: "Best sleep perf",  pr: prs.sleep_perf_max, fmt: (v) => v.toFixed(0) + "%",     color: COLORS.recGood  },
+    ];
+    el.innerHTML = items.map(({ label, pr, fmt, color }) => {
+      if (!pr) return `<div style="background:var(--card-bg2);border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:var(--muted);font-weight:600;letter-spacing:.05em;text-transform:uppercase;">${label}</div><div style="font-size:20px;font-weight:700;color:var(--muted);margin-top:2px;">—</div></div>`;
+      return `<div style="background:var(--card-bg2);border-radius:8px;padding:10px 12px;">
+        <div style="font-size:10px;color:var(--muted);font-weight:600;letter-spacing:.05em;text-transform:uppercase;">${label}</div>
+        <div style="font-size:20px;font-weight:700;color:${color};margin-top:2px;">${fmt(pr.value)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:1px;">${pr.date}</div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    console.warn("[personal-records]", e);
+  }
 }
 
 function metricLabel(m) {

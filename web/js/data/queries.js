@@ -180,6 +180,37 @@ export async function dailyMetricsBefore(db, dateIso, limit) {
     .slice(0, limit);
 }
 
+/**
+ * Scan all daily_metrics and return all-time bests for key health metrics.
+ * Returns an object where each key maps to { value, date } or null if no data.
+ */
+export async function personalRecords(db) {
+  const tx = db.transaction('daily_metrics');
+  const all = await req2promise(tx.objectStore('daily_metrics').getAll());
+
+  function best(field, compareFn) {
+    // compareFn(a, b): returns true if a is "better" than b
+    let record = null;
+    for (const row of all) {
+      const v = row[field];
+      if (v == null) continue;
+      if (!record || compareFn(v, record.value)) {
+        record = { value: v, date: row.date };
+      }
+    }
+    return record;
+  }
+
+  return {
+    hrv_max:          best('rmssd_ms',              (a, b) => a > b),
+    rhr_min:          best('resting_hr',            (a, b) => a < b),
+    recovery_max:     best('recovery_score',        (a, b) => a > b),
+    sleep_max_min:    best('sleep_minutes',         (a, b) => a > b),
+    strain_max:       best('strain_score',          (a, b) => a > b),
+    sleep_perf_max:   best('sleep_performance_pct', (a, b) => a > b),
+  };
+}
+
 // ---------- workouts --------------------------------------------------------
 
 export async function replaceWorkoutsForDate(db, dateIso, workouts) {
