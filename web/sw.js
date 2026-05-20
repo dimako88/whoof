@@ -8,8 +8,8 @@ const CACHE_NAME = 'ms-vitality-v1';
 const PRECACHE = [
   '/',
   '/styles.css',
-  '/vendor/chart.umd.js',
-  '/vendor/fake-indexeddb.mjs',
+  '/vendor/chart.umd.min.js',
+  '/vendor/idb.min.js',
 ];
 
 // ---- Install: pre-cache core assets ----------------------------------------
