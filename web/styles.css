@@ -54,6 +54,19 @@ h1, h2, h3, h4, .brand, .big-num, .now-hr, #mvp-hr {
   font-family: inherit;
 }
 
+button {
+  font: inherit;
+  cursor: pointer;
+  background: var(--bg-2);
+  color: var(--fg);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 4px 10px;
+  transition: background .12s;
+}
+button:hover { background: var(--bg-3); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
 body {
   margin: 0; padding: 0;
   display: grid;
