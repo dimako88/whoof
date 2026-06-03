@@ -90,21 +90,23 @@ function makeCharacteristic() {
 // UUID-aware fake: getPrimaryService throws for the service UUID the device
 // doesn't expose (like a real strap), so the client's whoop5→whoop4 probe
 // falls back correctly. Pass 'whoop5' to simulate a Puffin strap.
-function makeFakeDevice(family = 'whoop4') {
+function makeFakeDevice(family = 'whoop4', opts = { withDiag: true }) {
   const slots = family === 'whoop5'
-    ? { svc: 'fd4b0001', cmd: 'fd4b0002', resp: 'fd4b0003', event: 'fd4b0004', data: 'fd4b0005' }
-    : { svc: '61080001', cmd: '61080002', resp: '61080003', event: '61080004', data: '61080005' };
+    ? { svc: 'fd4b0001', cmd: 'fd4b0002', resp: 'fd4b0003', event: 'fd4b0004', data: 'fd4b0005', diag: 'fd4b0007' }
+    : { svc: '61080001', cmd: '61080002', resp: '61080003', event: '61080004', data: '61080005', diag: '61080007' };
   const cmd = makeCharacteristic();
   const resp = makeCharacteristic();
   const data = makeCharacteristic();
   const event = makeCharacteristic();
+  const diag = makeCharacteristic();
   const service = {
     getCharacteristic: vi.fn(async (uuid) => {
       if (uuid.startsWith(slots.cmd)) return cmd;
       if (uuid.startsWith(slots.resp)) return resp;
       if (uuid.startsWith(slots.event)) return event;
       if (uuid.startsWith(slots.data)) return data;
-      throw new Error('unknown UUID ' + uuid);
+      if (opts.withDiag && uuid.startsWith(slots.diag)) return diag;
+      throw Object.assign(new Error('unknown UUID ' + uuid), { name: 'NotFoundError' });
     }),
   };
   const gatt = {
@@ -124,7 +126,7 @@ function makeFakeDevice(family = 'whoop4') {
     id: 'mock-strap',
     gatt,
     addEventListener: vi.fn(),
-    _chars: { cmd, resp, data, event },
+    _chars: { cmd, resp, data, event, diag },
   };
 }
 
@@ -414,6 +416,95 @@ describe('WhoopClient mocked BLE', () => {
       expect(metas).toHaveLength(1);
       expect(metas[0].kind).toBe('historyEnd');
       expect(metas[0].trim).toBe(7);
+    });
+  });
+
+  describe('WHOOP 5.0 candidate capture (task 8)', () => {
+    it('emits a rawCandidate for a 5.0 historical frame and does NOT fabricate a sample', async () => {
+      const dev5 = makeFakeDevice('whoop5');
+      const c = new WhoopClient();
+      vi.spyOn(c, '_postConnectFlow').mockResolvedValue();
+      await c.connectToDevice(dev5);
+
+      const candidates = [];
+      const samples = [];
+      c.on('rawCandidate', (x) => candidates.push(x));
+      c.on('historicalSample', (s) => samples.push(s));
+
+      // A historical frame whose k-revision (payload[1]=seq) is 18 = the
+      // skin-temp/resp candidate. Body length 5 keeps the payload 4-byte
+      // aligned so V5 adds no trailing pad byte. Bytes are arbitrary — the
+      // point is we capture them raw and do NOT decode.
+      const body = new Uint8Array([1, 2, 3, 4, 5]);
+      dev5._chars.data.fire(v5Frame(PacketType.HISTORICAL_DATA, 18, 7, body));
+
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0].kRevision).toBe(18);
+      expect(candidates[0].cmd).toBe(7);
+      expect(Array.from(candidates[0].data)).toEqual([1, 2, 3, 4, 5]);
+      // The 4.0 parseHistorical path must NOT run on a 5.0 body — no fake HR.
+      expect(samples).toHaveLength(0);
+    });
+
+    it('a 4.0 historical frame still decodes into a historicalSample', async () => {
+      const dev4 = makeFakeDevice('whoop4');
+      const c = new WhoopClient();
+      vi.spyOn(c, '_postConnectFlow').mockResolvedValue();
+      await c.connectToDevice(dev4);
+
+      const candidates = [];
+      const samples = [];
+      c.on('rawCandidate', (x) => candidates.push(x));
+      c.on('historicalSample', (s) => samples.push(s));
+
+      dev4._chars.data.fire(historicalFrame({ unix: 100, hr: 60, rr: 1000 }));
+      expect(candidates).toHaveLength(0);
+      expect(samples).toHaveLength(1);
+      expect(samples[0].heartRateBpm).toBe(60);
+    });
+
+    it('sendDebugSkinTempCommand writes a raw [0x73,0x0a] to diag (no V5 framing)', async () => {
+      const dev5 = makeFakeDevice('whoop5');
+      const c = new WhoopClient();
+      vi.spyOn(c, '_postConnectFlow').mockResolvedValue();
+      await c.connectToDevice(dev5);
+      expect(c.charDiag).not.toBeNull();
+
+      await c.sendDebugSkinTempCommand();
+      expect(dev5._chars.diag.writes).toHaveLength(1);
+      expect(Array.from(dev5._chars.diag.writes[0])).toEqual([0x73, 0x0a]);
+      // Raw write — not an 0xAA-framed V5 command.
+      expect(dev5._chars.diag.writes[0][0]).not.toBe(0xaa);
+    });
+
+    it('sendDebugSkinTempCommand is a no-op when the diag char is absent', async () => {
+      const dev5 = makeFakeDevice('whoop5', { withDiag: false });
+      const c = new WhoopClient();
+      vi.spyOn(c, '_postConnectFlow').mockResolvedValue();
+      await c.connectToDevice(dev5);
+      expect(c.charDiag).toBeNull();
+      await expect(c.sendDebugSkinTempCommand()).resolves.toBeUndefined();
+      expect(dev5._chars.diag.writes).toHaveLength(0);
+    });
+
+    it('_postConnectFlow pokes the diag char on 5.0 only', async () => {
+      for (const fam of ['whoop5', 'whoop4']) {
+        const dev = makeFakeDevice(fam);
+        const c = new WhoopClient();
+        vi.spyOn(c, '_postConnectFlow').mockResolvedValue();
+        await c.connectToDevice(dev);
+        c._postConnectFlow.mockRestore();
+
+        vi.spyOn(c, 'sendHello').mockResolvedValue();
+        vi.spyOn(c, 'getClock').mockResolvedValue(null);
+        vi.spyOn(c, 'downloadHistory').mockResolvedValue({ samples: 0 });
+        vi.spyOn(c, 'startRealtime').mockResolvedValue();
+        vi.spyOn(c, 'getBatteryLevel').mockResolvedValue();
+        const debugSpy = vi.spyOn(c, 'sendDebugSkinTempCommand');
+
+        await c._postConnectFlow();
+        expect(debugSpy).toHaveBeenCalledTimes(fam === 'whoop5' ? 1 : 0);
+      }
     });
   });
 

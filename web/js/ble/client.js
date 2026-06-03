@@ -89,6 +89,7 @@ export class WhoopClient {
     this.charResp = null;
     this.charData = null;
     this.charEvent = null;
+    this.charDiag = null;
     this.connected = false;
     this._reconnectBackoff = RECONNECT_INITIAL_MS;
     this._intentionalDisconnect = false;
@@ -175,6 +176,10 @@ export class WhoopClient {
     this.charResp  = await service.getCharacteristic(f.response);
     this.charData  = await service.getCharacteristic(f.data);
     this.charEvent = await service.getCharacteristic(f.event);
+    // Diagnostic characteristic (slot 0007) — optional. Used only to elicit 5.0
+    // skin-temp candidate packets; its absence must never abort the connection.
+    try { this.charDiag = await service.getCharacteristic(f.diag); }
+    catch { this.charDiag = null; }
 
     this.charData.addEventListener('characteristicvaluechanged', (e) => this._onData(e));
     await this.charData.startNotifications();
@@ -224,6 +229,13 @@ export class WhoopClient {
       await this.downloadHistory();
     } catch (e) {
       this._emit('error', e);
+    }
+
+    // 3b. (5.0 only) Poke the diag characteristic so the strap starts emitting
+    //     skin-temp candidate packets during this session. Fire-and-forget —
+    //     goose does the same, and a strap that ignores it is harmless.
+    if (this._family === 'whoop5') {
+      try { await this.sendDebugSkinTempCommand(); } catch (e) { this._emit('error', e); }
     }
 
     // 4. Start realtime
@@ -310,6 +322,21 @@ export class WhoopClient {
         break;
       }
       case PacketType.HISTORICAL_DATA: {
+        if (this._family === 'whoop5') {
+          // 5.0 historical bodies use a K-revision-specific layout that is NOT
+          // the 4.0 one — running parseHistorical here would fabricate a heart
+          // rate from the wrong offset. Instead emit the raw frame plus its
+          // k-revision (payload[1] = raw notification byte[9], goose's
+          // discriminator; k=18/24 carry the skin-temp/resp candidates) so the
+          // app can capture it for offline offset discovery. No value decode is
+          // performed. See docs/whoop5-candidate-capture.md.
+          this._emit('rawCandidate', {
+            kRevision: pkt.seq,
+            cmd: pkt.cmd,
+            data: Uint8Array.from(pkt.data),
+          });
+          break;
+        }
         try {
           const rec = parseHistorical(pkt.data);
           this._emit('historicalSample', rec);
@@ -510,6 +537,19 @@ export class WhoopClient {
   async stopRawData() {
     await this._sendCommand(CommandNumber.STOP_RAW_DATA, new Uint8Array([0x01]));
     this._rawActive = false;
+  }
+
+  /**
+   * (5.0 only) Write the debug-menu skin-temperature trigger to the diag
+   * characteristic: a raw 2-byte write [0x73, 0x0a] — NO V5 framing, no CRC,
+   * fire-and-forget, exactly as goose does. It prompts the strap to emit
+   * skin-temp candidate packets (k-revision 18/24) on the data char, which then
+   * surface as 'rawCandidate' events for offline analysis. No-op (not an error)
+   * if the diag characteristic wasn't acquired.
+   */
+  async sendDebugSkinTempCommand() {
+    if (!this.charDiag) return;
+    await this.charDiag.writeValue(new Uint8Array([0x73, 0x0a]));
   }
 
   async toggleImuMode(enable = true) {
