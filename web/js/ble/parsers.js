@@ -121,8 +121,12 @@ export function parseEvent(cmd, data) {
   const name = EventName[cmd] ?? `UNKNOWN_${cmd}`;
   const evt = { type: 'event', cmd, name };
 
-  // Most events have [u8 flag, u32 LE unix, ...] for the first 5 bytes.
-  if (data.length >= 5) evt.unix = u32le(data, 1);
+  // Most events have [u8 flag, u32 LE unix, ...] for the first 5 bytes. Skip
+  // the candidate events whose body layout is UNVERIFIED — decoding a unix from
+  // them would be the same fabrication we're avoiding for their values.
+  const isCandidate = cmd === EventNumber.TEMPERATURE_LEVEL ||
+                      cmd === EventNumber.STRAP_CONDITION_REPORT;
+  if (data.length >= 5 && !isCandidate) evt.unix = u32le(data, 1);
 
   switch (cmd) {
     case EventNumber.WRIST_ON:
@@ -148,11 +152,19 @@ export function parseEvent(cmd, data) {
     case EventNumber.RTC_LOST:
       evt.semantic = 'rtcLost';
       break;
+    case EventNumber.TEMPERATURE_LEVEL:
+      // 5.0 skin-temperature event. The body layout is UNVERIFIED — goose
+      // treats this as a presence signal only — so we tag it and pass the raw
+      // bytes through for offline analysis rather than decoding a temperature.
+      evt.semantic = 'temperatureLevel';
+      evt.raw = data;
+      break;
+    case EventNumber.STRAP_CONDITION_REPORT:
+      evt.semantic = 'strapConditionReport';
+      evt.raw = data;
+      break;
     case EventNumber.HIGH_FREQ_SYNC_PROMPT:
       evt.semantic = 'syncPrompt';
-      break;
-    case EventNumber.DOUBLE_TAP:
-      evt.semantic = 'doubleTap';
       break;
     case EventNumber.ERROR:
       evt.semantic = 'error';
@@ -255,8 +267,11 @@ export function decodePacket(pkt) {
     case PacketType.HISTORICAL_DATA:
       return parseHistorical(pkt.data);
     case PacketType.METADATA:
+    case PacketType.PUFFIN_METADATA:
       return parseMetadata(pkt.cmd, pkt.data);
     case PacketType.EVENT:
+    case PacketType.RELATIVE_PUFFIN_EVENTS:
+    case PacketType.PUFFIN_EVENTS_FROM_STRAP:
       return parseEvent(pkt.cmd, pkt.data);
     case PacketType.COMMAND_RESPONSE:
       return { type: 'response', cmd: pkt.cmd, data: pkt.data };

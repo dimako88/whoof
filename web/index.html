@@ -26,8 +26,11 @@
 <link rel="mask-icon" href="/icons/icon.svg" color="#16EC06" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@200;300;400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/styles.css?v=2" />
+<!-- Load web fonts non-render-blocking so the PWA paints (and works offline)
+     immediately on the system-font fallback; fonts swap in when online. -->
+<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@200;300;400;500;600;700;800&display=swap">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@200;300;400;500;600;700;800&display=swap"></noscript>
+<link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
 <aside class="sidebar">
@@ -60,6 +63,10 @@
     <button class="tab" data-tab="live">
       <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M5 12a7 7 0 0 1 14 0M2 12a10 10 0 0 1 20 0"/></svg></span>
       Live
+    </button>
+    <button class="tab" data-tab="coach">
+      <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span>
+      Coach
     </button>
   </nav>
 
@@ -165,31 +172,50 @@
         <button id="mvp-pull-weight" style="font-size:10px;">📱 iPhone</button>
         <button id="mvp-scale" style="font-size:10px;">⚖️ Scale</button>
         <button id="mvp-manual-weight" style="font-size:10px;">✎</button>
+        <button id="mvp-health-import-btn" style="font-size:10px;">📄 Import</button>
         <button id="mvp-health-setup" style="font-size:10px;">Setup…</button>
       </div>
+      <input id="mvp-health-import" type="file" accept=".xml,text/xml,application/xml" style="display:none;"/>
     </div>
   </div>
 
   <!-- Apple Health setup modal -->
   <div id="health-setup" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:1000; justify-content:center; align-items:center;">
     <div style="background:var(--bg); color:var(--fg); padding:24px; max-width:520px; border:1px solid var(--border); border-radius:8px;">
-      <h2 style="margin-top:0;">Apple Health Setup</h2>
+      <h2 style="margin-top:0;">Apple Health Sync</h2>
       <p style="font-size:13px; line-height:1.5; color:var(--muted);">
-        Sync weight (and other Health metrics) from iPhone via the
-        <a href="https://www.healthyapps.dev/health-auto-export" target="_blank" style="color:var(--fg);">Health Auto Export</a>
-        app:
+        whoof runs entirely on your phone — these import your Apple Health data
+        with no server and nothing leaving the device.
       </p>
-      <ol style="font-size:13px; line-height:1.6;">
-        <li>Install <strong>Health Auto Export</strong> on your iPhone.</li>
-        <li>Open the app → <strong>Automations → REST API</strong>.</li>
-        <li>Add a new automation, paste this URL:
-          <code id="mvp-ingest-url" style="display:block; padding:6px; background:var(--card); margin:4px 0; word-break:break-all; font-size:12px;"></code>
-        </li>
-        <li>Pick metrics: <em>Body Mass, Height, Resting Heart Rate, VO2 Max</em>.</li>
-        <li>Save. Run <code>./run.sh dash --host 0.0.0.0</code> on this Mac so iPhone can reach it.</li>
+
+      <h3 style="font-size:13px; margin:14px 0 4px;">📄 Import export.xml (full history)</h3>
+      <ol style="font-size:13px; line-height:1.6; margin-top:2px;">
+        <li>iPhone <strong>Health app → profile photo → Export All Health Data</strong>.</li>
+        <li>Unzip the file, then tap <strong>📄 Import</strong> and pick <code>export.xml</code>.</li>
       </ol>
-      <p style="font-size:12px; color:var(--muted);">Or for an instant pull, install the <strong>WhoopPullWeight</strong> shortcut and tap "Pull from iPhone".</p>
-      <button id="mvp-health-close" style="float:right;">Close</button>
+      <p style="font-size:12px; color:var(--muted); margin-top:2px;">
+        Reads Body Mass, Height, Resting HR, VO₂ Max, Steps and more. Parsed on-device.
+      </p>
+
+      <h3 style="font-size:13px; margin:14px 0 4px;">📱 One-tap Shortcut (live values)</h3>
+      <p style="font-size:13px; line-height:1.5; margin-top:2px;">
+        Install a Shortcut that reads the metrics you want and opens
+        <code style="font-size:11px;">…/#health=&lt;data&gt;</code> back into whoof. Then tap
+        <strong>📱 iPhone</strong> any time to pull the latest. Works in Safari and Bluefy.
+      </p>
+
+      <details style="margin-top:14px;">
+        <summary style="font-size:12px; color:var(--muted); cursor:pointer;">Advanced: live LAN sync via Health Auto Export</summary>
+        <ol style="font-size:12px; line-height:1.6; margin-top:6px;">
+          <li>Run <code>./run.sh dash --host 0.0.0.0</code> on this Mac.</li>
+          <li>In <a href="https://www.healthyapps.dev/health-auto-export" target="_blank" style="color:var(--fg);">Health Auto Export</a> → <strong>Automations → REST API</strong>, paste:
+            <code id="mvp-ingest-url" style="display:block; padding:6px; background:var(--card); margin:4px 0; word-break:break-all; font-size:11px;"></code>
+          </li>
+          <li>Pick <em>Body Mass, Height, Resting Heart Rate, VO2 Max</em> and save. Only works while the Mac server is running on the same Wi-Fi.</li>
+        </ol>
+      </details>
+
+      <button id="mvp-health-close" style="float:right; margin-top:10px;">Close</button>
     </div>
   </div>
 
@@ -397,6 +423,34 @@
         <div class="components" id="recovery-components" style="margin-top:14px;"></div>
       </div>
       <div class="card span-2">
+        <span class="card-eyebrow" title="VO₂max estimated from resting HR (Uth–Sørensen). Fitness age and WHOOP age compare your physiology to population norms.">Fitness &amp; longevity</span>
+        <div style="display:flex; gap:22px; flex-wrap:wrap; margin-top:16px;">
+          <div>
+            <div class="big-num" style="font-size:34px;"><span id="rec-vo2max">—</span></div>
+            <div style="font-size:10px; color:var(--muted);">VO₂max · <span id="rec-vo2max-cat">—</span></div>
+          </div>
+          <div>
+            <div class="big-num" style="font-size:34px;"><span id="rec-fitness-age">—</span></div>
+            <div style="font-size:10px; color:var(--muted);">Fitness age</div>
+          </div>
+          <div>
+            <div class="big-num" style="font-size:34px;"><span id="rec-whoop-age">—</span></div>
+            <div style="font-size:10px; color:var(--muted);" id="rec-whoop-age-sub">WHOOP age</div>
+          </div>
+        </div>
+      </div>
+      <div class="card span-2">
+        <span class="card-eyebrow" title="Today's core vitals vs your personal rolling baseline. A coloured dot flags anything out of range.">Health monitor <span id="rec-health-overall"></span></span>
+        <div id="rec-health-monitor" style="margin-top:14px;"></div>
+      </div>
+      <div class="card span-2">
+        <span class="card-eyebrow" title="Average daytime stress — HRV suppression measured in rolling 5-minute windows. 0 = calm, 100 = highly stressed.">Stress · today</span>
+        <div style="display:flex; align-items:baseline; gap:12px; margin-top:10px;">
+          <div class="big-num" style="font-size:44px;"><span id="rec-stress">—</span><span class="unit" style="color:var(--text-muted);">/100</span></div>
+          <div id="rec-stress-label" style="font-size:12px; font-weight:600; letter-spacing:.04em;"></div>
+        </div>
+      </div>
+      <div class="card span-2">
         <div class="card-eyebrow">Recovery score · 30 days</div>
         <div class="chart-wrap"><canvas id="recovery-30d"></canvas></div>
       </div>
@@ -521,13 +575,20 @@
         <span class="card-eyebrow">Calories</span>
         <div class="big-num" style="font-size:44px; margin-top:12px; color: var(--warn);"><span id="strain-cals">—</span><span class="unit" style="color:var(--text-muted);">kcal</span></div>
       </div>
-      <div class="card" id="acwr-card">
-        <span class="card-eyebrow" title="Acute (7d) / Chronic (21d) workload ratio. Sweet spot 0.8–1.3; >1.5 = injury risk; <0.6 = detraining.">Training load (ACWR)</span>
-        <div style="display:flex; align-items:baseline; gap:10px; margin-top:12px;">
-          <div class="big-num" style="font-size:44px;"><span id="acwr-ratio">—</span></div>
-          <div id="acwr-band" style="font-size:10px; font-weight:700; letter-spacing:.12em;">—</div>
+      <div class="card">
+        <span class="card-eyebrow" title="Time-in-zone weighted 1–5, blended 70/30 with HR reserve. An interpretable companion to day strain.">Zone strain</span>
+        <div class="big-num" style="font-size:44px; margin-top:12px;"><span id="strain-zone">—</span><span class="unit" style="color:var(--text-muted);">/21</span></div>
+      </div>
+      <div class="card span-2" id="energy-bank-card">
+        <span class="card-eyebrow" title="Calories split into a resting baseline and active burn (MET model). Budget left = today's recovery strain ceiling minus strain spent.">Energy bank</span>
+        <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:14px; align-items:flex-end;">
+          <div><div class="big-num" style="font-size:32px; color:var(--warn);"><span id="energy-active">—</span></div><div style="font-size:10px; color:var(--text-muted);">Active kcal</div></div>
+          <div><div class="big-num" style="font-size:32px;"><span id="energy-resting">—</span></div><div style="font-size:10px; color:var(--text-muted);">Resting kcal</div></div>
+          <div><div class="big-num" style="font-size:32px;"><span id="energy-remaining">—</span></div><div style="font-size:10px; color:var(--text-muted);">Strain budget left</div></div>
         </div>
-        <div id="acwr-detail" style="font-size:11px; color:var(--text-muted); margin-top:6px;"></div>
+        <div style="margin-top:14px; height:8px; border-radius:4px; background:rgba(255,255,255,.08); overflow:hidden;">
+          <div id="energy-bank-fill" style="height:100%; width:0%; background:#03B5F3; border-radius:4px; transition:width .4s ease;"></div>
+        </div>
       </div>
       <div class="card span-4">
         <span class="card-eyebrow">Time in zones</span>
@@ -680,6 +741,28 @@
       </div>
     </div>
   </section>
+
+  <!-- ─── COACH (AI) ─────────────────────────────────────────── -->
+  <section class="tab-panel" data-panel="coach">
+    <header class="panel-header">
+      <div>
+        <h1>Coach</h1>
+        <div class="panel-subtitle">Ask about your recovery, strain, sleep &amp; stress — grounded in today's data</div>
+      </div>
+    </header>
+    <div class="grid">
+      <div class="card span-4" style="display:flex; flex-direction:column; min-height:62vh;">
+        <div id="coach-log" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding:6px 2px;"></div>
+        <form id="coach-form" style="display:flex; gap:8px; margin-top:12px;">
+          <input id="coach-input" type="text" autocomplete="off" enterkeyhint="send"
+            placeholder="e.g. Why is my recovery low today?"
+            style="flex:1; padding:12px 14px; border-radius:10px; border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.04); color:var(--text); font-size:14px;" />
+          <button class="primary" type="submit" id="coach-send">Send</button>
+        </form>
+        <div class="hint" style="margin-top:8px;">Runs on Cloudflare Workers AI. Educational only — not medical advice.</div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <!-- ─── SETTINGS DRAWER ─────────────────────────────────────────────── -->
@@ -732,6 +815,14 @@
   <button class="mtab" data-tab="trends" aria-label="Trends">
     <svg viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
     Trends
+  </button>
+  <button class="mtab" data-tab="live" aria-label="Live">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>
+    Live
+  </button>
+  <button class="mtab" data-tab="coach" aria-label="Coach">
+    <svg viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+    Coach
   </button>
 </nav>
 

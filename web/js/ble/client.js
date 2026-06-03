@@ -12,13 +12,10 @@
 //
 // Auto-reconnects with exponential backoff on `gattserverdisconnected`.
 
-import {
-  SERVICE_UUID, CHAR_COMMAND_UUID, CHAR_RESPONSE_UUID,
-  CHAR_DATA_UUID, CHAR_EVENT_UUID,
-} from './uuids.js';
+import { FAMILIES } from './uuids.js';
 import {
   WhoopPacket, PacketType, CommandNumber, EventNumber, MetadataType,
-  buildCommandFrame,
+  EVENT_TYPES, METADATA_TYPES, buildCommandFrame, buildV5CommandFrame, decodeV5,
 } from './packet.js';
 import {
   decodePacket, parseBatteryResponse, parseClockResponse,
@@ -31,6 +28,15 @@ const RECONNECT_MAX_MS = 30000;
 const BATTERY_POLL_MS = 60000;
 const RTC_DRIFT_THRESHOLD_S = 5;
 const META_QUEUE_TIMEOUT_MS = 30000;
+
+// WHOOP 5.0 connect preamble. The strap ignores all commands until this
+// CLIENT_HELLO (cmd 0x91 = GET_HELLO, capabilities byte 0x01) is written to the
+// command characteristic. Identical to buildV5CommandFrame(1, 0x91, [0x01]);
+// kept as a literal so a framing regression can't silently break the handshake.
+const CLIENT_HELLO_V5 = new Uint8Array([
+  0xaa, 0x01, 0x08, 0x00, 0x00, 0x01, 0xe6, 0x71,
+  0x23, 0x01, 0x91, 0x01, 0x36, 0x3e, 0x5c, 0x8d,
+]);
 
 /**
  * Tiny async queue used to feed METADATA packets from the data-channel
@@ -49,7 +55,7 @@ class AsyncQueue {
   async pop(timeoutMs) {
     if (this._items.length) return this._items.shift();
     return new Promise((resolve, reject) => {
-      const entry = [resolve];
+      const entry = [resolve, reject];
       this._waiters.push(entry);
       if (timeoutMs) {
         setTimeout(() => {
@@ -60,6 +66,18 @@ class AsyncQueue {
     });
   }
   clear() { this._items.length = 0; }
+
+  // Reject every pending pop() waiter so a coroutine blocked on the queue
+  // (e.g. the historical-dump loop) unwinds immediately instead of waiting out
+  // its 30s timeout. Used on disconnect.
+  drain(err) {
+    this._items.length = 0;
+    const waiters = this._waiters.splice(0);
+    for (const w of waiters) {
+      const reject = w[1];
+      if (reject) reject(err);
+    }
+  }
 }
 
 export class WhoopClient {
@@ -71,6 +89,7 @@ export class WhoopClient {
     this.charResp = null;
     this.charData = null;
     this.charEvent = null;
+    this.charDiag = null;
     this.connected = false;
     this._reconnectBackoff = RECONNECT_INITIAL_MS;
     this._intentionalDisconnect = false;
@@ -78,7 +97,10 @@ export class WhoopClient {
     this._batteryPollInterval = null;
     this._metaQueue = new AsyncQueue();
     this._historicalDumpInFlight = false;
+    this._disconnectHandler = null;
     this._state = 'disconnected';
+    this._family = 'whoop4';   // resolved per-connection from the discovered service
+    this._physiologyGapMs = 250;  // inter-command spacing for the 5.0 capture sequence
 
     // Cached strap state surfaced to the UI:
     this.charging = null;
@@ -99,28 +121,65 @@ export class WhoopClient {
   async requestAndConnect() {
     this._intentionalDisconnect = false;
     this.device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [SERVICE_UUID] }, { namePrefix: 'WHOOP' }],
-      optionalServices: [SERVICE_UUID],
+      filters: [
+        { services: [FAMILIES.whoop5.service] },
+        { services: [FAMILIES.whoop4.service] },
+        { namePrefix: 'WHOOP' },
+      ],
+      optionalServices: [FAMILIES.whoop5.service, FAMILIES.whoop4.service],
     });
-    this.device.addEventListener('gattserverdisconnected', () => this._onDisconnected());
+    this._attachDisconnectHandler();
     await this._connect();
   }
 
   async connectToDevice(device) {
     this._intentionalDisconnect = false;
     this.device = device;
-    this.device.addEventListener('gattserverdisconnected', () => this._onDisconnected());
+    this._attachDisconnectHandler();
     await this._connect();
+  }
+
+  // Attach the gattserverdisconnected handler exactly once per device, removing
+  // any previous one first, so repeated connect calls on the same (possibly
+  // bridge-cached) device object don't stack handlers and fire N parallel
+  // reconnect chains + battery pollers.
+  _attachDisconnectHandler() {
+    if (this._disconnectHandler) {
+      this.device.removeEventListener('gattserverdisconnected', this._disconnectHandler);
+    }
+    this._disconnectHandler = () => this._onDisconnected();
+    this.device.addEventListener('gattserverdisconnected', this._disconnectHandler);
   }
 
   async _connect() {
     this._setState('connecting');
     this.server = await this.device.gatt.connect();
-    const service = await this.server.getPrimaryService(SERVICE_UUID);
-    this.charCmd   = await service.getCharacteristic(CHAR_COMMAND_UUID);
-    this.charResp  = await service.getCharacteristic(CHAR_RESPONSE_UUID);
-    this.charData  = await service.getCharacteristic(CHAR_DATA_UUID);
-    this.charEvent = await service.getCharacteristic(CHAR_EVENT_UUID);
+
+    // Detect the strap generation: probe the 5.0 service first, fall back to
+    // 4.0 only when that service is genuinely absent (NotFoundError). Any other
+    // failure (mid-connection GATT error, power event) must propagate, not be
+    // mistaken for "this is a 4.0 strap" — that would send 4.0 frames to a 5.0
+    // device and silently break the session.
+    let service;
+    try {
+      service = await this.server.getPrimaryService(FAMILIES.whoop5.service);
+      this._family = 'whoop5';
+    } catch (err) {
+      if (err && err.name && err.name !== 'NotFoundError') throw err;
+      service = await this.server.getPrimaryService(FAMILIES.whoop4.service);
+      this._family = 'whoop4';
+    }
+    const f = FAMILIES[this._family];
+    this._emit('family', { family: this._family, name: f.name });
+
+    this.charCmd   = await service.getCharacteristic(f.command);
+    this.charResp  = await service.getCharacteristic(f.response);
+    this.charData  = await service.getCharacteristic(f.data);
+    this.charEvent = await service.getCharacteristic(f.event);
+    // Diagnostic characteristic (slot 0007) — optional. Used only to elicit 5.0
+    // skin-temp candidate packets; its absence must never abort the connection.
+    try { this.charDiag = await service.getCharacteristic(f.diag); }
+    catch { this.charDiag = null; }
 
     this.charData.addEventListener('characteristicvaluechanged', (e) => this._onData(e));
     await this.charData.startNotifications();
@@ -130,6 +189,15 @@ export class WhoopClient {
 
     this.charEvent.addEventListener('characteristicvaluechanged', (e) => this._onEvent(e));
     await this.charEvent.startNotifications();
+
+    // 5.0 straps ignore every command until this CLIENT_HELLO lands, so a failed
+    // write means a dead session — let it propagate so _connect rejects and the
+    // reconnect backoff retries, rather than limping on with a strap that
+    // silently drops all subsequent commands.
+    if (this._family === 'whoop5') {
+      await this.charCmd.writeValue(CLIENT_HELLO_V5);
+      this._clientHelloSent = true;
+    }
 
     this.connected = true;
     this._reconnectBackoff = RECONNECT_INITIAL_MS;
@@ -163,6 +231,13 @@ export class WhoopClient {
       this._emit('error', e);
     }
 
+    // 3b. (5.0 only) Poke the diag characteristic so the strap starts emitting
+    //     skin-temp candidate packets during this session. Fire-and-forget —
+    //     goose does the same, and a strap that ignores it is harmless.
+    if (this._family === 'whoop5') {
+      try { await this.sendDebugSkinTempCommand(); } catch (e) { this._emit('error', e); }
+    }
+
     // 4. Start realtime
     try {
       await this.startRealtime();
@@ -190,11 +265,19 @@ export class WhoopClient {
       clearInterval(this._batteryPollInterval);
       this._batteryPollInterval = null;
     }
-    // Drain any pending metadata waiter so a dump-in-flight rejects promptly.
-    this._metaQueue.clear();
+    // On a disconnect mid-dump, emit historyError once and reject the dump
+    // coroutine's queue waiter so it unwinds immediately instead of stalling on
+    // the 30s queue timeout. The _fromDisconnect flag tells downloadHistory not
+    // to emit a second historyError as it unwinds; resetting the in-flight flag
+    // lets a reconnect start a fresh dump.
     if (this._historicalDumpInFlight) {
-      this._emit('historyError', new Error('disconnected during dump'));
+      const err = new Error('disconnected during dump');
+      err._fromDisconnect = true;
       this._historicalDumpInFlight = false;
+      this._emit('historyError', err);
+      this._metaQueue.drain(err);
+    } else {
+      this._metaQueue.clear();
     }
     if (this._intentionalDisconnect) return;
     this._setState('reconnecting');
@@ -214,12 +297,24 @@ export class WhoopClient {
 
   // ----- notification handlers --------------------------------------------
 
-  _onData(e) {
+  // Decode a raw notification into WhoopPackets. A 4.0 notification is a single
+  // framed packet; a 5.0 notification may concatenate several Puffin frames.
+  // Returns { packets, error } — error is only set on the 4.0 single-frame path
+  // so _onData can surface it exactly as before.
+  _decodeNotification(e) {
     const v = bytesOf(e.target.value);
-    let pkt;
-    try { pkt = WhoopPacket.fromData(v); }
-    catch (err) { this._emit('error', err); return; }
+    if (this._family === 'whoop5') return { packets: decodeV5(v) };
+    try { return { packets: [WhoopPacket.fromData(v)] }; }
+    catch (error) { return { packets: [], error }; }
+  }
 
+  _onData(e) {
+    const { packets, error } = this._decodeNotification(e);
+    if (error) { this._emit('error', error); return; }
+    for (const pkt of packets) this._handleDataPacket(pkt);
+  }
+
+  _handleDataPacket(pkt) {
     switch (pkt.type) {
       case PacketType.REALTIME_DATA: {
         const decoded = decodePacket(pkt);
@@ -227,13 +322,30 @@ export class WhoopClient {
         break;
       }
       case PacketType.HISTORICAL_DATA: {
+        if (this._family === 'whoop5') {
+          // 5.0 historical bodies use a K-revision-specific layout that is NOT
+          // the 4.0 one — running parseHistorical here would fabricate a heart
+          // rate from the wrong offset. Instead emit the raw frame plus its
+          // k-revision (payload[1] = raw notification byte[9], goose's
+          // discriminator; k=18/24 carry the skin-temp/resp candidates) so the
+          // app can capture it for offline offset discovery. No value decode is
+          // performed. See docs/whoop5-candidate-capture.md.
+          this._emit('rawCandidate', {
+            kRevision: pkt.seq,
+            cmd: pkt.cmd,
+            data: Uint8Array.from(pkt.data),
+          });
+          break;
+        }
         try {
           const rec = parseHistorical(pkt.data);
           this._emit('historicalSample', rec);
         } catch (err) { this._emit('error', err); }
         break;
       }
-      case PacketType.METADATA: {
+      case PacketType.METADATA:
+      case PacketType.PUFFIN_METADATA: {
+        // PUFFIN_METADATA (5.0) is the history-end signal, same as METADATA.
         const meta = decodePacket(pkt);
         this._metaQueue.push(meta);
         this._emit('metadata', meta);
@@ -257,10 +369,11 @@ export class WhoopClient {
   }
 
   _onResponse(e) {
-    const v = bytesOf(e.target.value);
-    let pkt;
-    try { pkt = WhoopPacket.fromData(v); }
-    catch { return; }
+    const { packets } = this._decodeNotification(e);
+    for (const pkt of packets) this._handleResponsePacket(pkt);
+  }
+
+  _handleResponsePacket(pkt) {
     // Cache the well-known responses for callers waiting on them.
     if (pkt.cmd === CommandNumber.GET_BATTERY_LEVEL) {
       const pct = parseBatteryResponse(pkt.data);
@@ -281,11 +394,12 @@ export class WhoopClient {
   }
 
   _onEvent(e) {
-    const v = bytesOf(e.target.value);
-    let pkt;
-    try { pkt = WhoopPacket.fromData(v); }
-    catch { return; }
-    if (pkt.type !== PacketType.EVENT) return;
+    const { packets } = this._decodeNotification(e);
+    for (const pkt of packets) this._handleEventPacket(pkt);
+  }
+
+  _handleEventPacket(pkt) {
+    if (!EVENT_TYPES.includes(pkt.type)) return;
     const evt = decodePacket(pkt);
 
     // Surface state-relevant ones onto the client itself + emit:
@@ -310,17 +424,52 @@ export class WhoopClient {
 
   async _sendCommand(cmd, payload = new Uint8Array()) {
     if (!this.charCmd) throw new Error('Not connected');
-    const frame = buildCommandFrame(cmd, payload, this._seq);
+    const frame = this._family === 'whoop5'
+      ? buildV5CommandFrame(this._seq, cmd, payload)
+      : buildCommandFrame(cmd, payload, this._seq);
     this._seq = (this._seq + 1) & 0xff;
     await this.charCmd.writeValue(frame);
   }
 
   async startRealtime() {
+    if (this._family === 'whoop5') return this.startPhysiologyCapture();
     await this._sendCommand(CommandNumber.TOGGLE_REALTIME_HR, new Uint8Array([0x01]));
   }
 
   async stopRealtime() {
+    if (this._family === 'whoop5') return this.stopPhysiologyCapture();
     await this._sendCommand(CommandNumber.TOGGLE_REALTIME_HR, new Uint8Array([0x00]));
+  }
+
+  // 5.0 realtime needs more than the single TOGGLE_REALTIME_HR: the strap only
+  // streams optical (R10/R11) + IMU once a sequence of stream toggles is sent,
+  // spaced out so the strap can act on each. Each command is a "revision
+  // boolean" payload [0x01, enabled]. Stop reverses the order with enabled=0.
+  async startPhysiologyCapture() {
+    const seq = [
+      CommandNumber.TOGGLE_REALTIME_HR, CommandNumber.SEND_R10_R11_REALTIME,
+      CommandNumber.TOGGLE_IMU_MODE, CommandNumber.TOGGLE_PERSISTENT_R21,
+      CommandNumber.ENABLE_OPTICAL_DATA, CommandNumber.TOGGLE_OPTICAL_MODE,
+      CommandNumber.TOGGLE_PERSISTENT_R20,
+    ];
+    await this._runSpacedCommands(seq, 0x01);
+  }
+
+  async stopPhysiologyCapture() {
+    const seq = [
+      CommandNumber.TOGGLE_PERSISTENT_R20, CommandNumber.TOGGLE_OPTICAL_MODE,
+      CommandNumber.ENABLE_OPTICAL_DATA, CommandNumber.TOGGLE_PERSISTENT_R21,
+      CommandNumber.TOGGLE_IMU_MODE, CommandNumber.SEND_R10_R11_REALTIME,
+      CommandNumber.TOGGLE_REALTIME_HR,
+    ];
+    await this._runSpacedCommands(seq, 0x00);
+  }
+
+  async _runSpacedCommands(cmds, enabled) {
+    for (let i = 0; i < cmds.length; i++) {
+      await this._sendCommand(cmds[i], new Uint8Array([0x01, enabled & 0x01]));
+      if (i < cmds.length - 1 && this._physiologyGapMs > 0) await delay(this._physiologyGapMs);
+    }
   }
 
   async getBatteryLevel() {
@@ -348,11 +497,17 @@ export class WhoopClient {
   }
 
   async setClock(unix = Math.floor(Date.now() / 1000)) {
+    if (this._family === 'whoop5') {
+      // 5.0 wants 8 bytes: u32 LE seconds + u32 LE subseconds (1/32768ths).
+      const sub = Math.floor((Date.now() % 1000) * 32768 / 1000);
+      const buf = new Uint8Array(8);
+      writeU32LE(buf, 0, unix);
+      writeU32LE(buf, 4, sub);
+      await this._sendCommand(CommandNumber.SET_CLOCK, buf);
+      return;
+    }
     const buf = new Uint8Array(4);
-    buf[0] = unix & 0xff;
-    buf[1] = (unix >>> 8) & 0xff;
-    buf[2] = (unix >>> 16) & 0xff;
-    buf[3] = (unix >>> 24) & 0xff;
+    writeU32LE(buf, 0, unix);
     await this._sendCommand(CommandNumber.SET_CLOCK, buf);
   }
 
@@ -384,6 +539,19 @@ export class WhoopClient {
     this._rawActive = false;
   }
 
+  /**
+   * (5.0 only) Write the debug-menu skin-temperature trigger to the diag
+   * characteristic: a raw 2-byte write [0x73, 0x0a] — NO V5 framing, no CRC,
+   * fire-and-forget, exactly as goose does. It prompts the strap to emit
+   * skin-temp candidate packets (k-revision 18/24) on the data char, which then
+   * surface as 'rawCandidate' events for offline analysis. No-op (not an error)
+   * if the diag characteristic wasn't acquired.
+   */
+  async sendDebugSkinTempCommand() {
+    if (!this.charDiag) return;
+    await this.charDiag.writeValue(new Uint8Array([0x73, 0x0a]));
+  }
+
   async toggleImuMode(enable = true) {
     await this._sendCommand(CommandNumber.TOGGLE_IMU_MODE, new Uint8Array([enable ? 0x01 : 0x00]));
   }
@@ -409,11 +577,25 @@ export class WhoopClient {
 
   async setAlarm(unixTime) {
     if (!Number.isFinite(unixTime) || unixTime <= 0) throw new Error('alarm time invalid');
+    if (this._family === 'whoop5') {
+      // 5.0 alarm is a 20-byte payload: set sub-cmd, alarm id, u32 seconds,
+      // u16 subseconds, an 8-byte haptic waveform, loop control, and duration.
+      const buf = new Uint8Array(20);
+      buf[0] = 0x04;            // sub-command: set
+      buf[1] = 0x01;            // alarm id
+      writeU32LE(buf, 2, unixTime);
+      const sub = Math.floor((Date.now() % 1000) * 32768 / 1000);
+      buf[6] = sub & 0xff;
+      buf[7] = (sub >>> 8) & 0xff;
+      buf.set([47, 152, 0, 0, 0, 0, 0, 0], 8);  // default WHOOP haptic waveform
+      // bytes 16-17 loop control = 0
+      buf[18] = 7;             // overall loop count
+      buf[19] = 30;            // duration seconds
+      await this._sendCommand(CommandNumber.SET_ALARM_TIME, buf);
+      return;
+    }
     const buf = new Uint8Array(4);
-    buf[0] = unixTime & 0xff;
-    buf[1] = (unixTime >>> 8) & 0xff;
-    buf[2] = (unixTime >>> 16) & 0xff;
-    buf[3] = (unixTime >>> 24) & 0xff;
+    writeU32LE(buf, 0, unixTime);
     await this._sendCommand(CommandNumber.SET_ALARM_TIME, buf);
   }
 
@@ -473,8 +655,15 @@ export class WhoopClient {
 
     let samplesReceived = 0;
     const onSample = this.on('historicalSample', () => { samplesReceived++; });
+    let highFreq = false;
 
     try {
+      // Clear any half-finished transmit left by a prior aborted dump, then
+      // switch the strap into high-frequency sync for a faster bulk drain.
+      // Both are best-effort — a strap that rejects them still dumps fine.
+      try { await this.abortHistoricalTransmits(); } catch {}
+      try { await this.enterHighFreqSync(); highFreq = true; } catch {}
+
       await this._sendCommand(CommandNumber.SEND_HISTORICAL_DATA, new Uint8Array([0x00]));
 
       while (true) {
@@ -501,10 +690,15 @@ export class WhoopClient {
         this._emit('historyProgress', { samples: samplesReceived, trim: meta.trim });
       }
     } catch (err) {
-      this._emit('historyError', err);
+      // _onDisconnected already emitted historyError for a disconnect-driven
+      // abort; don't double-emit. Other failures (timeout, write error) emit here.
+      if (!err?._fromDisconnect) this._emit('historyError', err);
       throw err;
     } finally {
+      // Unsubscribe the sample counter first so a stray late notification during
+      // the exit-sync round-trip can't touch it.
       onSample();
+      if (highFreq) { try { await this.exitHighFreqSync(); } catch {} }
       this._historicalDumpInFlight = false;
     }
   }
@@ -516,3 +710,13 @@ function bytesOf(dataView) {
   // The browser hands us a DataView; convert to a plain Uint8Array view.
   return new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
 }
+
+function writeU32LE(buf, off, value) {
+  const v = value >>> 0;
+  buf[off]     = v & 0xff;
+  buf[off + 1] = (v >>> 8) & 0xff;
+  buf[off + 2] = (v >>> 16) & 0xff;
+  buf[off + 3] = (v >>> 24) & 0xff;
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

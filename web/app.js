@@ -112,8 +112,8 @@ function renderDateNav(elId, iso) {
 async function fetchJSON(url, opts) {
   // Try the in-browser IndexedDB shim first (v0.3). If it returns null,
   // the path isn't routed — fall back to network fetch for compatibility.
-  if (window.whoopApi) {
-    const shimResult = await window.whoopApi.handle(url, opts);
+  if (window.whoofApi) {
+    const shimResult = await window.whoofApi.handle(url, opts);
     if (shimResult !== null) return shimResult;
   }
   const r = await fetch(url, opts);
@@ -123,7 +123,7 @@ async function fetchJSON(url, opts) {
 
 /* ───────────────────────────── Tab routing ─────────────────────────── */
 
-const TABS = ["overview", "recovery", "sleep", "strain", "trends", "live"];
+const TABS = ["overview", "recovery", "sleep", "strain", "trends", "live", "coach"];
 let activeTab = "overview";
 
 function setTab(name) {
@@ -145,6 +145,17 @@ function setTab(name) {
 function initTabs() {
   document.querySelectorAll(".tab, .mtab").forEach((b) =>
     b.addEventListener("click", () => setTab(b.dataset.tab)));
+  const coachForm = $("coach-form");
+  if (coachForm) {
+    coachForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = $("coach-input");
+      if (!input) return;
+      const text = input.value;
+      input.value = "";
+      sendCoachMessage(text);
+    });
+  }
   const initial = (location.hash || "#overview").slice(1);
   setTab(initial);
 }
@@ -157,6 +168,79 @@ async function loadActiveTab() {
     case "strain":   return loadStrain();
     case "trends":   return loadTrends();
     case "live":     return loadLive();
+    case "coach":    return loadCoach();
+  }
+}
+
+/* ───────────────────────────── Coach (AI) ──────────────────────────── */
+
+let _coachMetrics = null;     // today's metric snapshot, fetched lazily
+let _coachHistory = [];       // [{role, content}] prior turns for context
+let _coachGreeted = false;
+let _coachBusy = false;
+
+function coachBubble(role, text) {
+  const log = $("coach-log");
+  if (!log) return null;
+  const wrap = document.createElement("div");
+  const isUser = role === "user";
+  wrap.style.cssText = `max-width:82%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.5; white-space:pre-wrap; ` +
+    (isUser
+      ? "align-self:flex-end; background:#03B5F3; color:#04121b; border-bottom-right-radius:4px;"
+      : "align-self:flex-start; background:rgba(255,255,255,.06); color:var(--text); border-bottom-left-radius:4px;");
+  wrap.textContent = text;
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return wrap;
+}
+
+async function loadCoach() {
+  // Pull today's full metric row once (recovery summary is the whole dm).
+  if (!_coachMetrics) {
+    try {
+      const data = await fetchJSON(`/api/recovery?date=${todayIso()}`);
+      _coachMetrics = data.summary || {};
+    } catch { _coachMetrics = {}; }
+  }
+  if (!_coachGreeted) {
+    _coachGreeted = true;
+    const r = _coachMetrics.recovery_score;
+    const hello = r != null
+      ? `Hey — your recovery is ${Math.round(r)}% today. Ask me anything about your recovery, strain, sleep, or stress.`
+      : `Hey — connect your strap to compute today's metrics, then ask me about your recovery, strain, sleep, or stress.`;
+    coachBubble("assistant", hello);
+  }
+}
+
+async function sendCoachMessage(text) {
+  if (_coachBusy) return;
+  const msg = text.trim();
+  if (!msg) return;
+  _coachBusy = true;
+  const send = $("coach-send");
+  if (send) send.disabled = true;
+  coachBubble("user", msg);
+  _coachHistory.push({ role: "user", content: msg });
+  const thinking = coachBubble("assistant", "…");
+  try {
+    const res = await fetch("/api/coach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: msg, metrics: _coachMetrics || {}, history: _coachHistory.slice(0, -1) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const reply = res.ok && data.reply
+      ? data.reply
+      : (res.status === 503
+        ? "Coach isn't enabled on this deployment yet (Workers AI binding missing)."
+        : `Sorry — I couldn't answer that (${data.message || res.status}).`);
+    if (thinking) thinking.textContent = reply;
+    if (res.ok && data.reply) _coachHistory.push({ role: "assistant", content: data.reply });
+  } catch (e) {
+    if (thinking) thinking.textContent = "Network error reaching the coach.";
+  } finally {
+    _coachBusy = false;
+    if (send) send.disabled = false;
   }
 }
 
@@ -715,6 +799,7 @@ async function loadRecovery() {
     { name: "HRV",       v: m.recovery_hrv_component   },
     { name: "Resting HR",v: m.recovery_rhr_component   },
     { name: "Sleep",     v: m.recovery_sleep_component },
+    { name: "Respiratory", v: m.recovery_resp_component },
     { name: "Prior strain", v: m.recovery_strain_component },
   ];
   // HRV baseline tag line (today vs. 14-day baseline)
@@ -766,6 +851,65 @@ async function loadRecovery() {
       <div class="val">${c.v == null ? "—" : Math.round(c.v)}</div>
     </div>
   `).join("");
+
+  // ---- Stress (daytime average) --------------------------------------------
+  if ($("rec-stress")) {
+    const st = m.stress_avg;
+    $("rec-stress").textContent = st == null ? "—" : Math.round(st);
+    const lbl = $("rec-stress-label");
+    if (lbl) {
+      if (st == null) { lbl.textContent = ""; }
+      else {
+        const tier = st < 34 ? ["CALM", COLORS.recGood] : st < 67 ? ["MODERATE", COLORS.recMid] : ["HIGH", COLORS.recBad];
+        lbl.textContent = tier[0];
+        lbl.style.color = tier[1];
+      }
+    }
+  }
+
+  // ---- Fitness & longevity (VO2max, fitness age, WHOOP age) ----------------
+  const setText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  setText("rec-vo2max", m.vo2max != null ? m.vo2max.toFixed(1) : "—");
+  setText("rec-vo2max-cat", m.vo2max_category ?? "—");
+  setText("rec-fitness-age", m.fitness_age != null ? Math.round(m.fitness_age) : "—");
+  setText("rec-whoop-age", m.whoop_age != null ? Math.round(m.whoop_age) : "—");
+  if ($("rec-whoop-age-sub")) {
+    if (m.whoop_age != null && m.whoop_age_delta != null) {
+      const d = m.whoop_age_delta;
+      const col = d < 0 ? COLORS.recGood : d > 0 ? COLORS.recBad : COLORS.muted;
+      $("rec-whoop-age-sub").innerHTML =
+        `WHOOP age · <span style="color:${col}">${d < 0 ? "−" : "+"}${Math.abs(d).toFixed(1)}y vs actual</span>`;
+    } else {
+      $("rec-whoop-age-sub").textContent = "WHOOP age";
+    }
+  }
+
+  // ---- Health Monitor — today's vitals vs personal baseline ----------------
+  const hm = data.health_monitor;
+  if ($("rec-health-monitor")) {
+    if (hm && hm.vitals && hm.vitals.length) {
+      const dotColor = (s) =>
+        s === "normal" ? COLORS.recGood
+        : (s === "elevated" || s === "low") ? COLORS.recBad
+        : COLORS.muted;
+      $("rec-health-monitor").innerHTML = hm.vitals.map((v) => `
+        <div style="display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid var(--hairline);">
+          <span style="width:8px; height:8px; border-radius:50%; background:${dotColor(v.status)}; flex-shrink:0;"></span>
+          <span style="flex:1; font-size:12px;">${v.label}</span>
+          <span style="font-variant-numeric:tabular-nums; font-size:12px; color:var(--fg);">${v.value == null ? "—" : v.value + " " + v.unit}</span>
+          <span style="font-size:10px; color:var(--muted); width:72px; text-align:right;">${v.status === "unavailable" ? "" : v.status}</span>
+        </div>
+      `).join("");
+      if ($("rec-health-overall")) {
+        const oc = hm.overall === "green" ? COLORS.recGood : hm.overall === "yellow" ? COLORS.recMid : COLORS.recBad;
+        $("rec-health-overall").innerHTML = `<span style="color:${oc}">●</span>`;
+      }
+    } else {
+      $("rec-health-monitor").innerHTML =
+        `<div style="font-size:11px; color:var(--muted);">Wear your strap a few more days to build a baseline.</div>`;
+      if ($("rec-health-overall")) $("rec-health-overall").innerHTML = "";
+    }
+  }
 
   // Trend charts
   const trend = data.trend || [];
@@ -978,6 +1122,24 @@ async function loadStrain() {
     $("strain-target").textContent = coach ? `Based on recovery: ${coach.split("·")[1]?.trim() ?? ""}` : "";
   }
   $("strain-cals").textContent = fmtInt(m.calories);
+
+  // Zone-weighted strain (interpretable companion score)
+  if ($("strain-zone")) {
+    $("strain-zone").textContent = m.zone_weighted_strain_score == null
+      ? "—" : m.zone_weighted_strain_score.toFixed(1);
+  }
+
+  // Energy bank — active/resting split + remaining strain budget gauge
+  if ($("energy-active")) {
+    $("energy-active").textContent = m.energy_kcal_active == null ? "—" : fmtInt(m.energy_kcal_active);
+    $("energy-resting").textContent = m.energy_kcal_resting == null ? "—" : fmtInt(m.energy_kcal_resting);
+    const remaining = m.energy_bank_remaining;
+    $("energy-remaining").textContent = remaining == null ? "—" : remaining.toFixed(1);
+    // Fill = remaining as a fraction of today's recovery-set budget (recovery/100·21).
+    const budget = m.recovery_score != null ? (m.recovery_score / 100) * 21 : 21;
+    const pct = (remaining == null || budget <= 0) ? 0 : Math.max(0, Math.min(100, (remaining / budget) * 100));
+    if ($("energy-bank-fill")) $("energy-bank-fill").style.width = `${pct}%`;
+  }
 
   // Zones row — modernised with vertical bars + labels
   const zoneMins = (m && m.zone_minutes) || [0, 0, 0, 0, 0];

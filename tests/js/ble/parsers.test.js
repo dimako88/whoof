@@ -118,6 +118,28 @@ describe('parseEvent', () => {
     const out = parseEvent(255, new Uint8Array([0, 0, 0, 0, 0]));
     expect(out.name).toBe('UNKNOWN_255');
   });
+
+  it('tags TEMPERATURE_LEVEL as a candidate without decoding a temperature', () => {
+    const body = new Uint8Array([0, 1, 2, 3, 4, 0xab, 0xcd]);
+    const out = parseEvent(EventNumber.TEMPERATURE_LEVEL, body);
+    expect(out.name).toBe('TEMPERATURE_LEVEL');
+    expect(out.semantic).toBe('temperatureLevel');
+    // Raw bytes are passed through for offline analysis...
+    expect(out.raw).toBe(body);
+    // ...but no decoded value is fabricated — not a temperature, and not even
+    // the generic event timestamp (its offset is unverified for this event).
+    expect(out.temperatureC).toBeUndefined();
+    expect(out.celsius).toBeUndefined();
+    expect(out.unix).toBeUndefined();
+  });
+
+  it('tags STRAP_CONDITION_REPORT and passes raw bytes through, no value decode', () => {
+    const body = new Uint8Array([0, 9, 8, 7, 6]);
+    const out = parseEvent(EventNumber.STRAP_CONDITION_REPORT, body);
+    expect(out.semantic).toBe('strapConditionReport');
+    expect(out.raw).toBe(body);
+    expect(out.unix).toBeUndefined();
+  });
 });
 
 describe('parseBatteryResponse', () => {
