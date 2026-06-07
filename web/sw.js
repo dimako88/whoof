@@ -7,12 +7,13 @@
 // so old caches are pruned on activate.
 const CACHE_NAME = 'whoof-v7';
 
-// Assets to pre-cache on install. Paths are relative to SW scope (/)
+// Assets to pre-cache on install. Paths are relative to the SW scope, so the
+// PWA works both at a root domain and under GitHub Pages subpaths.
 const PRECACHE = [
-  '/',
-  '/styles.css',
-  '/vendor/chart.umd.min.js',
-  '/vendor/idb.min.js',
+  './',
+  './styles.css',
+  './vendor/chart.umd.min.js',
+  './vendor/idb.min.js',
 ];
 
 // ---- Install: pre-cache core assets ----------------------------------------
@@ -44,13 +45,16 @@ self.addEventListener('activate', (event) => {
 
 // Paths that are safe to cache-first (immutable vendor bundles, fonts).
 const IMMUTABLE_PATHS = [
-  '/vendor/',
-  '/icons/',
-  '/manifest.json',
+  'vendor/',
+  'icons/',
+  'manifest.json',
 ];
 
 function isImmutable(url) {
-  return IMMUTABLE_PATHS.some((p) => url.pathname.startsWith(p));
+  return IMMUTABLE_PATHS.some((p) => {
+    const scoped = new URL(p, self.registration.scope).pathname;
+    return url.pathname.startsWith(scoped);
+  });
 }
 
 self.addEventListener('fetch', (event) => {
@@ -61,7 +65,7 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
 
   // Skip BLE / WebSocket / API traffic.
-  if (url.pathname.startsWith('/api/')) return;
+  if (url.pathname.startsWith(new URL('api/', self.registration.scope).pathname)) return;
 
   // Network-first for HTML and app code (so design changes land immediately).
   // Falls back to cached copy when offline.
