@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <title>whoof</title>
-<link rel="manifest" href="/manifest.json" />
+<link rel="manifest" href="./manifest.json" />
 <meta name="theme-color" content="#07070A" />
 <meta name="color-scheme" content="dark" />
 <meta name="description" content="Open-source Whoop 4.0 dashboard. Runs entirely in your browser — no subscription, no cloud." />
@@ -17,20 +17,20 @@
 <meta name="format-detection" content="telephone=no" />
 
 <!-- Apple touch icon (180×180 is the canonical iOS size) + size variants -->
-<link rel="apple-touch-icon" href="/icons/icon-180.png" />
-<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png" />
-<link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png" />
-<link rel="apple-touch-icon" sizes="512x512" href="/icons/icon-512.png" />
-<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
-<link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
-<link rel="mask-icon" href="/icons/icon.svg" color="#16EC06" />
+<link rel="apple-touch-icon" href="./icons/icon-180.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="./icons/icon-180.png" />
+<link rel="apple-touch-icon" sizes="192x192" href="./icons/icon-192.png" />
+<link rel="apple-touch-icon" sizes="512x512" href="./icons/icon-512.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="./icons/icon-512.png" />
+<link rel="mask-icon" href="./icons/icon.svg" color="#16EC06" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <!-- Load web fonts non-render-blocking so the PWA paints (and works offline)
      immediately on the system-font fallback; fonts swap in when online. -->
 <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@200;300;400;500;600;700;800&display=swap">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@200;300;400;500;600;700;800&display=swap"></noscript>
-<link rel="stylesheet" href="/styles.css" />
+<link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
 <aside class="sidebar">
@@ -828,24 +828,24 @@
 
 
 
-<script src="/vendor/chart.umd.min.js"></script>
+<script src="./vendor/chart.umd.min.js"></script>
 <!-- Capacitor runtime — only loaded when running inside the native iOS shell.
      Capacitor injects this automatically via its WebView, but referencing it
      here is harmless on the web (404 silently). -->
 <script type="module">
   // Install the BLE bridge if we're running inside Capacitor.
   if (window.Capacitor?.isNativePlatform?.()) {
-    import('/js/ble/capacitor-bridge.js').catch((e) => console.warn('[boot] BLE bridge', e));
+    import('./js/ble/capacitor-bridge.js').catch((e) => console.warn('[boot] BLE bridge', e));
   }
 </script>
-<script type="module" src="/js/data/api-shim.js"></script>
-<script src="/app.js"></script>
-<script type="module" src="/js/app-mvp.js"></script>
+<script type="module" src="./js/data/api-shim.js"></script>
+<script src="./app.js"></script>
+<script type="module" src="./js/app-mvp.js"></script>
 <script>
   // PWA service worker — registered after page load so it doesn't delay FCP.
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').catch((err) => {
+      navigator.serviceWorker.register('./sw.js', { scope: './' }).catch((err) => {
         // Non-fatal: SW registration may fail in dev (file:// origins, etc.)
         console.warn('[sw] registration failed', err);
       });
